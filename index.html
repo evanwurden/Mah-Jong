@@ -349,11 +349,7 @@
                 <div class="form-group">
                     <label for="rounds">Number of Rounds</label>
                     <input type="number" id="rounds" min="1" max="100" value="14">
-                </div>
-                <div class="form-group">
-                    <label for="tables">Tables per Round</label>
-                    <input type="number" id="tables" min="1" max="25" value="3">
-                    <small>4 players per table</small>
+                    <small>Tables auto-calculated (4 players per table)</small>
                 </div>
             </div>
 
@@ -376,26 +372,26 @@
         // Update info box when inputs change
         document.getElementById('players').addEventListener('input', updateInfo);
         document.getElementById('rounds').addEventListener('input', updateInfo);
-        document.getElementById('tables').addEventListener('input', updateInfo);
 
         function updateInfo() {
             const players = getPlayerNames();
             const rounds = parseInt(document.getElementById('rounds').value) || 0;
-            const tables = parseInt(document.getElementById('tables').value) || 0;
             const infoBox = document.getElementById('config-info');
 
             if (players.length >= 4) {
-                const seatsPerRound = tables * 4;
-                const sitoutsPerRound = players.length - seatsPerRound;
+                const numTables = Math.floor(players.length / 4);
+                const sitoutsPerRound = players.length - numTables * 4;
+                const totalPairSlots = numTables * 6 * rounds; // C(4,2)=6 pairs per table
+                const totalPairs = players.length * (players.length - 1) / 2;
+                const idealPairings = totalPairSlots / totalPairs;
 
-                let html = `<strong>${players.length} players</strong> &bull; ${rounds} rounds &bull; ${tables} tables per round`;
+                let html = `<strong>${players.length} players</strong> &bull; ${rounds} rounds &bull; ${numTables} table${numTables > 1 ? 's' : ''} per round`;
 
                 if (sitoutsPerRound > 0) {
                     html += ` &bull; <strong>${sitoutsPerRound} sit-out${sitoutsPerRound > 1 ? 's' : ''}</strong> per round`;
-                } else if (sitoutsPerRound < 0) {
-                    html += ` &bull; ⚠️ Not enough players to fill ${tables} tables!`;
                 }
 
+                html += `<br>Target: each pair plays together ~${idealPairings.toFixed(1)} times`;
                 infoBox.innerHTML = html;
                 infoBox.style.display = 'block';
             } else {
@@ -412,15 +408,9 @@
         function generateSchedule() {
             const players = getPlayerNames();
             const numRounds = parseInt(document.getElementById('rounds').value);
-            const numTables = parseInt(document.getElementById('tables').value);
 
             if (players.length < 4) {
                 alert('Please enter at least 4 player names.');
-                return;
-            }
-
-            if (numTables * 4 > players.length) {
-                alert(`Not enough players for ${numTables} tables. You need at least ${numTables * 4} players.`);
                 return;
             }
 
@@ -429,6 +419,7 @@
                 return;
             }
 
+            const numTables = Math.floor(players.length / 4);
             const schedule = createBalancedSchedule(players, numRounds, numTables);
             lastSchedule = schedule;
             lastPlayers = players;
@@ -448,38 +439,19 @@
             const sitoutCounts = new Array(n).fill(0);
             // Track how many times each pair has played together
             const pairCounts = Array.from({ length: n }, () => new Array(n).fill(0));
-            // Track how many times each player has been at each table position
-            const tableCounts = Array.from({ length: n }, () => new Array(numTables).fill(0));
 
             const rounds = [];
 
             for (let round = 0; round < numRounds; round++) {
-                // Determine sit-outs: pick players with fewest sit-outs, break ties randomly
+                // Determine sit-outs: pick players who have sat out the fewest times
                 let sitouts = [];
                 if (sitoutsPerRound > 0) {
                     const indices = Array.from({ length: n }, (_, i) => i);
-                    // Sort by sitout count (ascending), then random for ties
                     indices.sort((a, b) => {
                         const diff = sitoutCounts[a] - sitoutCounts[b];
                         if (diff !== 0) return diff;
                         return Math.random() - 0.5;
                     });
-                    // Pick the ones with most sitouts last - we want those with fewest
-                    // Actually we sorted ascending, so first ones have fewest sitouts
-                    // We want to sit out those who have sat out least? No - we want fairness
-                    // Everyone should sit out roughly equally, so pick those with FEWEST sitouts
-                    // Wait - that's wrong. We want to sit out those who have sat out the LEAST
-                    // so they "catch up". Actually no - we want to pick those who have sat out
-                    // the LEAST to sit out this time? That doesn't make sense either.
-                    // 
-                    // Correct logic: sit out those who have sat out the FEWEST times,
-                    // so everyone's sit-out count stays balanced.
-                    // Actually: We pick the players with LOWEST sit-out count to sit out now,
-                    // which balances everyone toward equal sit-outs.
-                    
-                    // Hmm, let me reconsider. If we have 14 players and 2 sitouts per round,
-                    // over 14 rounds that's 28 total sitouts / 14 players = 2 each.
-                    // To balance: each round, pick the players who have the fewest sitouts so far.
                     sitouts = indices.slice(0, sitoutsPerRound);
                 }
 
@@ -492,7 +464,7 @@
                 }
 
                 // Assign available players to tables, minimizing repeat pairings
-                const tables = assignTables(available, numTables, pairCounts, tableCounts);
+                const tables = assignTables(available, numTables, pairCounts);
 
                 // Update tracking
                 for (const si of sitouts) {
@@ -502,7 +474,6 @@
                 for (let t = 0; t < tables.length; t++) {
                     const table = tables[t];
                     for (let i = 0; i < table.length; i++) {
-                        tableCounts[table[i]][t]++;
                         for (let j = i + 1; j < table.length; j++) {
                             pairCounts[table[i]][table[j]]++;
                             pairCounts[table[j]][table[i]]++;
@@ -519,13 +490,14 @@
             return rounds;
         }
 
-        function assignTables(available, numTables, pairCounts, tableCounts) {
-            // Greedy approach: try multiple random arrangements and pick the best one
+        function assignTables(available, numTables, pairCounts) {
+            // Use a combination of random sampling and local optimization
             const playersPerTable = 4;
             let bestTables = null;
             let bestScore = Infinity;
 
-            const attempts = 50;
+            // More attempts for better results, scaled by player count
+            const attempts = Math.min(500, 50 + available.length * 10);
 
             for (let attempt = 0; attempt < attempts; attempt++) {
                 // Shuffle available players
@@ -541,20 +513,15 @@
                     tables.push(shuffled.slice(t * playersPerTable, (t + 1) * playersPerTable));
                 }
 
-                // Score: sum of pair counts for all pairs at same table (lower is better)
+                // Score: penalize unevenness in pair counts (variance-based)
                 let score = 0;
                 for (const table of tables) {
                     for (let i = 0; i < table.length; i++) {
                         for (let j = i + 1; j < table.length; j++) {
-                            score += pairCounts[table[i]][table[j]] * 2;
+                            const count = pairCounts[table[i]][table[j]];
+                            // Quadratic penalty: heavily penalize pairs that already played a lot
+                            score += (count + 1) * (count + 1);
                         }
-                    }
-                }
-
-                // Also penalize table position repetition slightly
-                for (let t = 0; t < tables.length; t++) {
-                    for (const p of tables[t]) {
-                        score += tableCounts[p][t] * 0.1;
                     }
                 }
 
@@ -564,7 +531,58 @@
                 }
             }
 
+            // Local optimization: try swapping players between tables
+            bestTables = localOptimize(bestTables, pairCounts);
+
             return bestTables;
+        }
+
+        function localOptimize(tables, pairCounts) {
+            // Try all possible swaps between tables to improve score
+            let improved = true;
+            let iterations = 0;
+            const maxIterations = 100;
+
+            while (improved && iterations < maxIterations) {
+                improved = false;
+                iterations++;
+
+                for (let t1 = 0; t1 < tables.length; t1++) {
+                    for (let t2 = t1 + 1; t2 < tables.length; t2++) {
+                        for (let i = 0; i < tables[t1].length; i++) {
+                            for (let j = 0; j < tables[t2].length; j++) {
+                                // Calculate current score for both tables
+                                const currentScore = tableScore(tables[t1], pairCounts) + tableScore(tables[t2], pairCounts);
+
+                                // Swap players
+                                [tables[t1][i], tables[t2][j]] = [tables[t2][j], tables[t1][i]];
+
+                                // Calculate new score
+                                const newScore = tableScore(tables[t1], pairCounts) + tableScore(tables[t2], pairCounts);
+
+                                if (newScore < currentScore) {
+                                    improved = true; // Keep the swap
+                                } else {
+                                    // Revert swap
+                                    [tables[t1][i], tables[t2][j]] = [tables[t2][j], tables[t1][i]];
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            return tables;
+        }
+
+        function tableScore(table, pairCounts) {
+            let score = 0;
+            for (let i = 0; i < table.length; i++) {
+                for (let j = i + 1; j < table.length; j++) {
+                    const count = pairCounts[table[i]][table[j]];
+                    score += (count + 1) * (count + 1);
+                }
+            }
+            return score;
         }
 
         function renderSchedule(schedule, players) {
@@ -625,7 +643,28 @@
                 });
             });
 
+            // Calculate balance metrics
+            const allPairCounts = [];
+            for (let i = 0; i < players.length; i++) {
+                for (let j = i + 1; j < players.length; j++) {
+                    allPairCounts.push(opponentCounts[players[i]][players[j]]);
+                }
+            }
+            const minPair = Math.min(...allPairCounts);
+            const maxPair = Math.max(...allPairCounts);
+            const avgPair = allPairCounts.reduce((a, b) => a + b, 0) / allPairCounts.length;
+            const variance = allPairCounts.reduce((sum, v) => sum + (v - avgPair) ** 2, 0) / allPairCounts.length;
+            const stdDev = Math.sqrt(variance);
+
             let html = `<div class="stats-section">`;
+            html += `<h3>Schedule Balance</h3>`;
+            html += `<div class="info-box" style="margin-bottom: 1rem;">`;
+            html += `<strong>Pairing evenness:</strong> Each pair plays together between <strong>${minPair}</strong> and <strong>${maxPair}</strong> times `;
+            html += `(avg: ${avgPair.toFixed(1)}, std dev: ${stdDev.toFixed(2)})<br>`;
+            html += `<strong>Sit-out range:</strong> ${Math.min(...Object.values(sitoutCounts))} – ${Math.max(...Object.values(sitoutCounts))} per player`;
+            html += `</div></div>`;
+
+            html += `<div class="stats-section">`;
             html += `<h3>Player Statistics</h3>`;
             html += `<div class="stats-grid">`;
 
